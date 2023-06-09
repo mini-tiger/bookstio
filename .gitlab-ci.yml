@@ -1,0 +1,201 @@
+#before_script:
+#  - pushd reviews
+#  - echo ${PWD}
+#  - pwd
+#  - sudo rm -rf reviews-wlpcfg/servers/LibertyProjectServer/apps
+#  - sudo rm -rf .gradle
+#  - sudo rm -rf ./reviews-application/build
+#  - sudo rm -rf reviews-wlpcfg/servers/LibertyProjectServer/apps
+#  - popd
+
+#after_script:
+#  - echo "after"
+#cache:
+#  key: "$CI_COMMIT_REF_SLUG"
+##  untracked: true   #所有未跟踪的文件
+#  paths:
+#    - reviews/
+#  policy: pull-push
+
+variables:
+  DOCKER_HUB_USERNAME: tao.jun
+  DOCKER_HUB_PASS: Taojun207
+  CLUSTER_NAME: kind1
+  APP_PATH: /usr/local/bin
+  KUBECTL: kubectl
+  HELM: helm
+  KIND: kind
+  ISTIOCTL: istioctl
+  IMAGE_HUB: harbor.dev.21vianet.com/bookinfo
+  GIT_CLEAN_FLAGS: -x -f -e reviews/**
+
+stages:
+  - download_soft
+  - pull_images
+  - kind_create
+  - build
+  - deploy
+  - test
+  - clean
+
+job0:
+  stage: download_soft
+  script:
+    - sudo make Install_kind
+    - sudo make Install_istio
+    - sudo make Install_kubectl
+    - sudo make Install_helm
+  only:
+    - dev
+    - master
+  tags:
+    - bookinfo
+
+job1:
+  stage: pull_images
+  variables:
+    APP_PATH: /usr/local/bin
+  script:
+    - sudo make pull_images
+#    - sudo docker pull ${IMAGE_HUB}/istio/proxyv2:1.6.8
+#    - sudo docker pull ${IMAGE_HUB}/grafana/grafana:6.7.4
+#    - sudo docker pull ${IMAGE_HUB}/prom/prometheus:v2.15.1
+#    - sudo docker pull ${IMAGE_HUB}/istio/pilot:1.6.8
+#    - sudo docker pull ${IMAGE_HUB}/jaegertracing/all-in-one:1.16
+#    - sudo docker pull ${IMAGE_HUB}/kiali/kiali:v1.18
+
+    - sudo  docker tag ${IMAGE_HUB}/istio/proxyv2:1.6.8 docker.io/istio/proxyv2:1.6.8
+    - sudo  docker tag ${IMAGE_HUB}/istio/pilot:1.6.8 docker.io/istio/pilot:1.6.8
+    - sudo  docker tag ${IMAGE_HUB}/grafana/grafana:6.7.4 docker.io/grafana/grafana:6.7.4
+    - sudo  docker tag ${IMAGE_HUB}/prom/prometheus:v2.15.1 docker.io/prom/prometheus:v2.15.1
+    - sudo  docker tag ${IMAGE_HUB}/jaegertracing/all-in-one:1.16 docker.io/jaegertracing/all-in-one:1.16
+    - sudo  docker tag ${IMAGE_HUB}/kiali/kiali:v1.18 quay.io/kiali/kiali:v1.18
+
+  only:
+    - dev
+    - master
+  tags:
+    - bookinfo
+
+
+job2:
+  stage: kind_create
+  script:
+    - sudo ${KIND} create cluster --name=${CLUSTER_NAME} --config k8s-1nodes.yaml --image harbor.dev.21vianet.com/kind/node:v1.20.7
+    - sudo ${KUBECTL} cluster-info --context kind-${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image   docker.io/istio/proxyv2:1.6.8 --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image   docker.io/istio/pilot:1.6.8 --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image   docker.io/grafana/grafana:6.7.4 --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image   docker.io/prom/prometheus:v2.15.1 --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image   docker.io/jaegertracing/all-in-one:1.16 --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image   quay.io/kiali/kiali:v1.18 --name ${CLUSTER_NAME}
+    - sudo ${ISTIOCTL} install --set profile=demo -y
+    - sudo ${KUBECTL} label namespace default istio-injection=enabled
+  only:
+    - dev
+    - master
+  tags:
+    - bookinfo
+
+job3:
+  stage: build
+  #  variables:
+  #      APP_PATH: /usr/local/bin
+  script:
+    - env
+    - pushd reviews
+    - echo ${PWD}
+    - pwd
+    #clean before build war.package
+    #    - sudo rm -rf reviews-wlpcfg/servers/LibertyProjectServer/apps
+    - sudo docker run --rm -u root -v "$(pwd)":/home/gradle/project -w /home/gradle/project harbor.dev.21vianet.com/bookinfo/gradle:4.8.1 gradle clean build
+    #    - sudo rm -rf .gradle
+    #    - sudo rm -rf ./reviews-application/build
+    - popd
+    - sudo docker build -t ${IMAGE_HUB}/reviews-v1:${CI_COMMIT_SHORT_SHA} reviews/reviews-wlpcfg
+    - sudo docker build -t ${IMAGE_HUB}/reviews-v2:${CI_COMMIT_SHORT_SHA} --build-arg service_version=v2 --build-arg enable_ratings=true --build-arg star_color=black reviews/reviews-wlpcfg
+    - sudo docker build -t ${IMAGE_HUB}/reviews-v3:${CI_COMMIT_SHORT_SHA} --build-arg service_version=v3 --build-arg enable_ratings=true --build-arg star_color=red reviews/reviews-wlpcfg
+    - sudo docker build -t ${IMAGE_HUB}/ratings:${CI_COMMIT_SHORT_SHA} ./ratings
+    - sudo docker build -t ${IMAGE_HUB}/productpage:${CI_COMMIT_SHORT_SHA} ./productpage
+    - sudo docker build -t ${IMAGE_HUB}/details:${CI_COMMIT_SHORT_SHA} ./details
+
+    - sudo docker login -u ${DOCKER_HUB_USERNAME} -p ${DOCKER_HUB_PASS} harbor.dev.21vianet.com
+    - sudo docker push ${IMAGE_HUB}/reviews-v1:${CI_COMMIT_SHORT_SHA}
+    - sudo docker push ${IMAGE_HUB}/reviews-v2:${CI_COMMIT_SHORT_SHA}
+    - sudo docker push ${IMAGE_HUB}/reviews-v3:${CI_COMMIT_SHORT_SHA}
+    - sudo docker push ${IMAGE_HUB}/ratings:${CI_COMMIT_SHORT_SHA}
+    - sudo docker push ${IMAGE_HUB}/details:${CI_COMMIT_SHORT_SHA}
+    - sudo docker push ${IMAGE_HUB}/productpage:${CI_COMMIT_SHORT_SHA}
+    - sudo docker logout
+
+    - sudo ${KIND} load docker-image  ${IMAGE_HUB}/reviews-v1:${CI_COMMIT_SHORT_SHA} --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image  ${IMAGE_HUB}/reviews-v2:${CI_COMMIT_SHORT_SHA} --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image  ${IMAGE_HUB}/reviews-v3:${CI_COMMIT_SHORT_SHA} --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image  ${IMAGE_HUB}/details:${CI_COMMIT_SHORT_SHA} --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image ${IMAGE_HUB}/ratings:${CI_COMMIT_SHORT_SHA} --name ${CLUSTER_NAME}
+    - sudo ${KIND} load docker-image ${IMAGE_HUB}/productpage:${CI_COMMIT_SHORT_SHA} --name ${CLUSTER_NAME}
+# clean
+#    - pushd reviews
+#    - echo ${PWD}
+#    - pwd
+#    - sudo rm -rf reviews-wlpcfg/servers/LibertyProjectServer/apps
+#    - sudo rm -rf .gradle
+#    - sudo rm -rf ./reviews-application/build
+#    - sudo rm -rf reviews-wlpcfg/servers/LibertyProjectServer/apps
+#    - popd
+
+  only:
+    - dev
+    - master
+  tags:
+    - bookinfo
+
+job4:
+  stage: deploy
+  script:
+    #    - sudo ${HELM} uninstall bookstio
+    - >
+      sudo ${HELM} install
+      --set reviews.weight.v1=15 --set reviews.weight.v2=15 --set reviews.weight.v3=70
+      --set productpage.image=${IMAGE_HUB}/productpage:${CI_COMMIT_SHORT_SHA}
+      --set details.image=${IMAGE_HUB}/details:${CI_COMMIT_SHORT_SHA}
+      --set ratings.image=${IMAGE_HUB}/ratings:${CI_COMMIT_SHORT_SHA}
+      --set reviews.image.v1=${IMAGE_HUB}/reviews-v1:${CI_COMMIT_SHORT_SHA}
+      --set reviews.image.v2=${IMAGE_HUB}/reviews-v2:${CI_COMMIT_SHORT_SHA}
+      --set reviews.image.v3=${IMAGE_HUB}/reviews-v3:${CI_COMMIT_SHORT_SHA}
+      bookstio ./chart
+  only:
+    - dev
+    - master
+  tags:
+    - bookinfo
+
+job5:
+  stage: test
+  script:
+    - sleep 120
+    - sudo chmod +x test.sh
+    - sudo ./test.sh
+
+  only:
+    - dev
+    - master
+  tags:
+    - bookinfo
+
+job6:
+  stage: clean
+  script:
+    - sudo ${KIND} delete cluster --name=${CLUSTER_NAME}
+    - sudo docker rmi ${IMAGE_HUB}/productpage:${CI_COMMIT_SHORT_SHA}
+    - sudo docker rmi ${IMAGE_HUB}/details:${CI_COMMIT_SHORT_SHA}
+    - sudo docker rmi ${IMAGE_HUB}/ratings:${CI_COMMIT_SHORT_SHA}
+    - sudo docker rmi ${IMAGE_HUB}/reviews-v1:${CI_COMMIT_SHORT_SHA}
+    - sudo docker rmi ${IMAGE_HUB}/reviews-v2:${CI_COMMIT_SHORT_SHA}
+    - sudo docker rmi ${IMAGE_HUB}/reviews-v3:${CI_COMMIT_SHORT_SHA}
+  only:
+    - dev
+    - master
+  tags:
+    - bookinfo
+  when: always
